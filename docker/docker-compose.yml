@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # Qdrant 向量数据库
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ai-cs-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=DEBUG
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: ai-cs-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ../api-gateway
+      dockerfile: ../docker/Dockerfile.gateway
+    container_name: ai-cs-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - AGENT_SERVICE_URL=http://agent-service:8000
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=your-secret-key-change-in-production
+    depends_on:
+      - redis
+      - agent-service
+    volumes:
+      - ../api-gateway:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+  # Agent Service
+  agent-service:
+    build:
+      context: ../agent-service
+      dockerfile: ../docker/Dockerfile.agent
+    container_name: ai-cs-agent-service
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=sqlite+aiosqlite:///./data/database.db
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MODEL_NAME=${MODEL_NAME:-deepseek-v4-flash}
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - ../agent-service:/app
+      - /app/.venv
+      - ../data:/app/data
+    restart: unless-stopped
+
+  # Frontend (开发模式)
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    container_name: ai-cs-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:3000
+      - VITE_WS_URL=ws://localhost:3000
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  redis_data:
