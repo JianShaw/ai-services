@@ -1,5 +1,5 @@
-import axios from 'axios'
-import { NotFoundError, ValidationError } from '../middleware/errorHandler'
+import axios, { AxiosError } from 'axios'
+import { NotFoundError } from '../middleware/errorHandler'
 import { io } from '../index'
 
 const AGENT_SERVICE_URL = process.env.AGENT_SERVICE_URL || 'http://localhost:8000'
@@ -29,7 +29,29 @@ function generateId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 }
 
+function logAxiosError(action: string, error: unknown) {
+  if (error instanceof AxiosError) {
+    const { status, statusText } = error.response || {}
+    console.error(`[${action}] ${error.code || 'UNKNOWN'} ${error.message} | upstream=${status} ${statusText}`)
+  } else {
+    console.error(`[${action}] ${error}`)
+  }
+}
+
 export const chatService = {
+  // 获取用户会话列表
+  async getUserConversations(userId: string) {
+    try {
+      const response = await agentApi.get('/chat/conversations', {
+        params: { userId }
+      })
+      return response.data
+    } catch (error) {
+      logAxiosError('fetch conversations', error)
+      throw new Error('Failed to fetch conversations')
+    }
+  },
+
   // 发送消息到AI服务
   async sendMessage(params: SendMessageParams) {
     try {
@@ -50,8 +72,24 @@ export const chatService = {
           metadata: {
             intent: result.intent,
             confidence: result.confidence,
-            needHuman: result.needHuman
+            needHuman: result.need_human,
+            riskLevel: result.risk_level,
+            traceId: result.trace_id,
+            route: result.route,
+            ticketId: result.ticket_id,
+            toolsUsed: result.tools_used || [],
+            sources: result.sources || []
           }
+        })
+      }
+
+      if (result.need_human) {
+        io.emit('human-transfer-request', {
+          conversationId: params.conversationId,
+          userId: params.userId,
+          reason: result.intent,
+          riskLevel: result.risk_level,
+          route: result.route
         })
       }
 
@@ -61,10 +99,16 @@ export const chatService = {
         cards: result.cards || [],
         intent: result.intent,
         confidence: result.confidence,
-        needHuman: result.need_human
+        needHuman: result.need_human,
+        riskLevel: result.risk_level,
+        traceId: result.trace_id,
+        route: result.route,
+        ticketId: result.ticket_id,
+        toolsUsed: result.tools_used || [],
+        sources: result.sources || []
       }
     } catch (error) {
-      console.error('Failed to send message to agent service:', error)
+      logAxiosError('send message', error)
       throw new Error('Failed to process message')
     }
   },
@@ -80,17 +124,9 @@ export const chatService = {
         channel: params.channel
       })
 
-      return {
-        id: conversationId,
-        userId: params.userId,
-        channel: params.channel,
-        status: 'active',
-        currentIntent: '',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
+      return response.data
     } catch (error) {
-      console.error('Failed to create conversation:', error)
+      logAxiosError('create conversation', error)
       throw new Error('Failed to create conversation')
     }
   },
@@ -130,6 +166,7 @@ export const chatService = {
 
       return { success: true }
     } catch (error) {
+      logAxiosError('transfer to human', error)
       throw new Error('Failed to transfer to human')
     }
   },
@@ -142,6 +179,7 @@ export const chatService = {
       })
       return { success: true }
     } catch (error) {
+      logAxiosError('rate message', error)
       throw new Error('Failed to rate message')
     }
   }

@@ -7,14 +7,21 @@ export interface AppError extends Error {
 
 export function errorHandler(
   err: AppError,
-  req: Request,
+  _req: Request,
   res: Response,
-  next: NextFunction
+  _next: NextFunction
 ) {
   const statusCode = err.statusCode || 500
   const message = err.message || 'Internal Server Error'
 
-  console.error('Error:', err)
+  if (statusCode >= 500) {
+    console.error(`[${new Date().toISOString()}] ${statusCode} ${err.name}: ${message}`)
+    if (err.stack) {
+      console.error(err.stack.split('\n').slice(1, 4).join('\n'))
+    }
+  } else {
+    console.warn(`[${new Date().toISOString()}] ${statusCode} ${err.name}: ${message}`)
+  }
 
   res.status(statusCode).json({
     error: {

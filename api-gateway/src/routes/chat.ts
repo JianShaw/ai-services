@@ -4,6 +4,20 @@ import { ValidationError } from '../middleware/errorHandler'
 
 const router = Router()
 
+// 获取用户会话列表
+router.get('/conversations', async (req, res, next) => {
+  try {
+    const { userId } = req.query
+    if (!userId) {
+      throw new ValidationError('userId is required')
+    }
+    const conversations = await chatService.getUserConversations(userId as string)
+    res.json(conversations)
+  } catch (error) {
+    next(error)
+  }
+})
+
 // 发送消息
 router.post('/messages', async (req, res, next) => {
   try {

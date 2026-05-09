@@ -9,7 +9,7 @@ const router = createRouter({
       redirect: '/chat'
     },
     {
-      path: '/chat',
+      path: '/chat/:id?',
       name: 'user-chat',
       component: () => import('../views/UserChat/UserChat.vue')
     },

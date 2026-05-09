@@ -1,7 +1,5 @@
-version: '3.8'
-
 services:
-  # Qdrant 向量数据库
+  # Qdrant vector database
   qdrant:
     image: qdrant/qdrant:latest
     container_name: ai-cs-qdrant
@@ -16,7 +14,7 @@ services:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: unless-stopped
 
-  # Redis 缓存
+  # Redis cache
   redis:
     image: redis:7-alpine
     container_name: ai-cs-redis
@@ -63,9 +61,9 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_API_KEY=
       - REDIS_URL=redis://redis:6379
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - MODEL_NAME=${MODEL_NAME:-deepseek-v4-flash}
     depends_on:
       - qdrant
@@ -76,7 +74,7 @@ services:
       - ../data:/app/data
     restart: unless-stopped
 
-  # Frontend (开发模式)
+  # Frontend development server
   frontend:
     build:
       context: ../frontend

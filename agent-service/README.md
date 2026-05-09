@@ -32,6 +32,18 @@ If `OPENAI_API_KEY` is empty or the model request fails, `/chat/messages` falls 
 uv run pytest tests/e2e -q
 ```
 
+## Seed Mock Orders
+
+```bash
+uv run python scripts/seed_orders.py
+```
+
+This creates these reusable mock order numbers:
+
+- `ORD-20260508-0001`
+- `ORD-20260508-0002`
+- `ORD-20260508-0003`
+
 ## Lock Dependencies
 
 After changing `pyproject.toml`, refresh the lock file:

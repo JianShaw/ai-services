@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.deepseek.com"
     anthropic_api_key: Optional[str] = None
     model_name: str = "deepseek-v4-flash"
-    ai_request_timeout: float = 30.0
+    ai_request_timeout: float = 8.0
 
     embedding_model: str = "text-embedding-ada-002"
     embedding_dimension: int = 1536
@@ -30,6 +31,17 @@ class Settings(BaseSettings):
     default_confidence_threshold: float = 0.7
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug_mode(cls, value):
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "prod", "production"}:
+                return False
+            if normalized in {"dev", "development"}:
+                return True
+        return value
 
 
 @lru_cache()

@@ -50,6 +50,30 @@
 - ✅ 客服工作台
 - ✅ 管理后台
 
+### 转人工流程
+
+用户可通过手动点击"转人工"按钮或发送含"转人工/投诉/退款"等关键词的消息触发转人工。完整流程如下：
+
+```
+用户发送消息 → 意图识别 → 判定 need_human=true
+     ↓
+ChatGraph 路由到 human_transfer_node → 返回"正在转接"回复
+     ↓
+API Gateway 通过 Socket.IO 广播 human-transfer-request 事件
+     ↓
+客服工作台收到通知 → 会话列表出现待接管会话
+     ↓
+客服点击"接管" → 会话状态变为 assigned → 用户端显示"人工客服已接入"
+     ↓
+客服通过工作台回复 → Socket.IO 实时推送至用户端
+```
+
+关键设计：
+- **意图识别**：基于关键词规则，区分普通请求、投诉、高风险等场景，输出风险等级（low/medium/high）
+- **条件路由**：LangGraph 根据意图自动分流到转人工/订单查询/知识库检索/工单创建/LLM 兜底等分支
+- **实时通信**：Socket.IO 实现双向消息推送，用户端与客服端共享同一连接，通过 conversation room 隔离消息
+- **状态流转**：`active` → `transferred`（等待接管）→ `assigned`（客服已接入）→ `closed`
+
 ## 快速开始
 
 ### 环境要求
@@ -128,6 +152,13 @@ Qdrant 和 Redis 由 Docker Compose 启动：
 ```bash
 cd docker
 docker compose up -d qdrant redis
+```
+
+后端需要 mock 订单数据时运行：
+
+```bash
+cd agent-service
+uv run python scripts/seed_orders.py
 ```
 
 ## 项目结构

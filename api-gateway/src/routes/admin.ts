@@ -3,7 +3,7 @@ import { Router } from 'express'
 const router = Router()
 
 // 管理员路由 - 待实现
-router.get('/stats', (req, res) => {
+router.get('/stats', (_req, res) => {
   res.json({
     totalConversations: 0,
     aiResolutionRate: 0,
@@ -14,19 +14,19 @@ router.get('/stats', (req, res) => {
   })
 })
 
-router.get('/knowledge/documents', (req, res) => {
+router.get('/knowledge/documents', (_req, res) => {
   res.json({ message: 'Knowledge documents endpoint - coming soon' })
 })
 
-router.post('/knowledge/documents', (req, res) => {
+router.post('/knowledge/documents', (_req, res) => {
   res.json({ message: 'Upload knowledge document endpoint - coming soon' })
 })
 
-router.get('/intents', (req, res) => {
+router.get('/intents', (_req, res) => {
   res.json({ message: 'Intents configuration endpoint - coming soon' })
 })
 
-router.get('/scripts', (req, res) => {
+router.get('/scripts', (_req, res) => {
   res.json({ message: 'Scripts configuration endpoint - coming soon' })
 })
 

@@ -1,9 +1,29 @@
-from typing import Optional, TypedDict
+from datetime import datetime, timedelta, timezone
+import logging
+from typing import Any, Optional, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
 from app.api.chat_types import AIResponse
+from app.config.settings import settings
+from app.models.database import async_session_maker
 from app.services.ai_client import AIClientError, deepseek_client
+from app.services.intent_service import (
+    INTENT_SLOTS,
+    IntentResult,
+    build_clarify_question,
+    classify_intent,
+)
+from app.services.knowledge_service import answer_from_knowledge
+from app.services.order_service import (
+    format_logistics_reply,
+    format_order_reply,
+    format_refund_reply,
+    get_order_snapshot,
+)
+
+log = logging.getLogger(__name__)
 
 
 class ChatState(TypedDict, total=False):
@@ -13,72 +33,295 @@ class ChatState(TypedDict, total=False):
     channel: str
     intent: str
     confidence: float
-    need_human: bool
+    risk_level: str
+    intent_reason: str
+    slots: dict[str, str]
+    order: Optional[dict[str, Any]]
+    sources: list[dict[str, Any]]
+    tools_used: list[str]
+    trace_id: str
+    route: str
+    ticket_id: Optional[str]
     reply: str
-
-
-def classify_intent(message: str) -> tuple[str, float, bool]:
-    message_lower = message.lower()
-
-    if "订单" in message_lower:
-        return "order_query", 0.8, False
-    if "退款" in message_lower:
-        return "refund_query", 0.85, False
-    if "转人工" in message_lower or "人工" in message_lower:
-        return "human_request", 0.95, True
-    if "物流" in message_lower:
-        return "logistics_query", 0.8, False
-    return "unknown", 0.5, False
+    pending_intent: Optional[str]
+    missing_slots: list[str]
+    classification_source: str
+    conversation_context: dict[str, Any]
 
 
 def fallback_reply(intent: str) -> str:
     replies = {
-        "order_query": "关于您的订单，我可以帮您查询。请提供订单号，我会继续为您确认订单信息。",
-        "refund_query": "关于退款问题，我可以帮您处理。请提供订单号，我会为您查询退款进度。",
-        "human_request": "正在为您转接人工客服，请稍等。",
-        "logistics_query": "我可以帮您查询物流信息。请提供订单号，我会为您确认最新物流状态。",
-        "unknown": "感谢您的咨询。请问您想了解订单信息、物流查询，还是退款相关服务？",
+        "check_order": "关于您的订单，我可以帮您查询。请提供订单号，我会继续为您确认订单信息。",
+        "check_logistics": "我可以帮您查询物流信息。请提供订单号，我会为您确认最新物流状态。",
+        "refund": "关于退款问题，我可以帮您处理。请提供订单号，我会为您查询退款进度。",
+        "invoice": "我可以帮您处理发票问题。请提供订单号。",
+        "modify_address": "我可以帮您修改收货地址。请提供订单号和新地址。",
+        "transfer_human": "正在为您转接人工客服，请稍等。",
+        "complaint": "非常抱歉给您带来不好的体验。这个问题我会为您转接人工客服继续处理，请稍等。",
+        "unknown": "感谢您的咨询。请问您想了解订单信息、物流查询、退款，还是其他服务？",
     }
     return replies.get(intent, replies["unknown"])
 
 
+def format_date_reply() -> str:
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    now = datetime.now(timezone(timedelta(hours=8)))
+    return f"今天是 {now.strftime('%Y-%m-%d')}，{weekdays[now.weekday()]}。"
+
+
+# ---- Nodes ----
+
+
+async def slot_fill_node(state: ChatState) -> ChatState:
+    """Entry node: check if we are in a multi-turn slot-filling flow."""
+    ctx = state.get("conversation_context", {})
+    pending_intent = ctx.get("pending_intent")
+    missing_slots = ctx.get("missing_slots", [])
+    existing_slots = ctx.get("slots", {})
+    log.info(f"[slot_fill] pending={pending_intent} missing={missing_slots} existing_slots={existing_slots}")
+
+    if pending_intent and missing_slots:
+        result = await classify_intent(
+            message=state["message"],
+            pending_intent=pending_intent,
+            missing_slots=missing_slots,
+            existing_slots=existing_slots,
+        )
+        return {
+            **state,
+            "intent": result.intent,
+            "confidence": result.confidence,
+            "slots": result.slots,
+            "pending_intent": pending_intent,
+            "missing_slots": _calc_missing(pending_intent, result.slots),
+            "classification_source": "slot_fill",
+            "risk_level": result.risk_level,
+        }
+
+    return {**state, "pending_intent": None, "missing_slots": [], "slots": {}}
+
+
+def _calc_missing(intent: str, slots: dict[str, str]) -> list[str]:
+    schema = INTENT_SLOTS.get(intent, {})
+    return [name for name, (_, required) in schema.items() if required and not slots.get(name)]
+
+
 async def classify_node(state: ChatState) -> ChatState:
-    intent, confidence, need_human = classify_intent(state["message"])
+    log.info(f"[classify] msg={state['message']!r}")
+    result = await classify_intent(message=state["message"])
+    log.info(f"[classify] result: intent={result.intent} conf={result.confidence} source={result.source} reason={result.reason} slots={result.slots}")
     return {
         **state,
-        "intent": intent,
-        "confidence": confidence,
-        "need_human": need_human,
+        "trace_id": state.get("trace_id") or f"trace_{uuid4().hex}",
+        "intent": result.intent,
+        "confidence": result.confidence,
+        "risk_level": result.risk_level,
+        "intent_reason": result.reason,
+        "slots": result.slots,
+        "classification_source": result.source,
+        "order": None,
+        "tools_used": [],
+        "sources": [],
+        "missing_slots": _calc_missing(result.intent, result.slots),
+    }
+
+
+def route_after_classify(state: ChatState) -> str:
+    intent = state["intent"]
+    confidence = state.get("confidence", 0)
+    if intent in {"transfer_human", "complaint"}:
+        log.info(f"[route] → human_transfer (intent={intent})")
+        return "human_transfer"
+    if confidence < 0.4:
+        log.info(f"[route] → human_transfer (conf={confidence} < 0.4)")
+        return "human_transfer"
+    if confidence < settings.default_confidence_threshold:
+        log.info(f"[route] → clarify (conf={confidence} < {settings.default_confidence_threshold})")
+        return "clarify"
+    log.info(f"[route] → check_slots (conf={confidence})")
+    return "check_slots"
+
+
+async def check_slots_node(state: ChatState) -> ChatState:
+    missing = state.get("missing_slots", [])
+    log.info(f"[check_slots] intent={state['intent']} missing={missing}")
+    if missing:
+        question = build_clarify_question(state["intent"], missing)
+        return {
+            **state,
+            "reply": question,
+            "route": "clarify",
+            "pending_intent": state["intent"],
+        }
+    return {**state, "pending_intent": None}
+
+
+def route_after_slots(state: ChatState) -> str:
+    if state.get("pending_intent") and state.get("missing_slots"):
+        return "clarify"
+    intent = state["intent"]
+    if intent in {"check_order", "check_logistics", "refund", "invoice", "modify_address"}:
+        return "business_tool"
+    return "generate"
+
+
+async def clarify_node(state: ChatState) -> ChatState:
+    return {
+        **state,
+        "route": "clarify",
+        "tools_used": [],
+    }
+
+
+async def human_transfer_node(state: ChatState) -> ChatState:
+    return {
+        **state,
+        "route": "human_transfer",
+        "tools_used": ["transfer_to_human"],
+        "reply": fallback_reply(state["intent"]),
+    }
+
+
+async def lookup_order_node(state: ChatState) -> ChatState:
+    order_id = (state.get("slots") or {}).get("order_id")
+    if not order_id:
+        return {**state, "order": None, "route": "business_tool", "tools_used": []}
+    order = await get_order_snapshot(order_id, state["user_id"])
+    return {
+        **state,
+        "order": order,
+        "route": "business_tool",
+        "tools_used": ["get_order_snapshot"],
+    }
+
+
+async def knowledge_node(state: ChatState) -> ChatState:
+    reply, sources = await answer_from_knowledge(state["message"])
+    return {
+        **state,
+        "route": "knowledge",
+        "tools_used": ["retrieve_knowledge"],
+        "reply": reply,
+        "sources": sources,
+    }
+
+
+async def ticket_node(state: ChatState) -> ChatState:
+    async with async_session_maker() as session:
+        from app.services.ticket_service import create_ticket as create_ticket_record
+
+        ticket = await create_ticket_record(
+            db=session,
+            conversation_id=state.get("conversation_id") or f"conv_{state['trace_id']}",
+            user_id=state["user_id"],
+            ticket_type="after_sales",
+            priority="medium",
+            description=state["message"],
+        )
+        await session.commit()
+
+    return {
+        **state,
+        "route": "ticket",
+        "tools_used": ["create_ticket"],
+        "ticket_id": ticket.id,
+        "reply": f"已为您创建售后工单 {ticket.id}，客服会继续跟进处理。",
     }
 
 
 async def generate_reply_node(state: ChatState) -> ChatState:
-    if state["need_human"]:
-        reply = fallback_reply(state["intent"])
+    intent = state["intent"]
+    slots = state.get("slots", {})
+    order = state.get("order")
+    order_id = slots.get("order_id")
+
+    if order and intent == "check_logistics":
+        reply = format_logistics_reply(order)
+    elif order and intent == "refund":
+        reply = format_refund_reply(order)
+    elif order and intent in {"check_order", "invoice", "modify_address"}:
+        reply = format_order_reply(order)
+        if intent == "invoice":
+            reply += "\n如需开具发票，请联系人工客服或前往订单详情页操作。"
+        elif intent == "modify_address":
+            reply += "\n如需修改地址，请联系人工客服协助处理。"
+    elif order_id:
+        reply = f"没有查询到订单 {order_id}。请确认订单号是否正确，或联系人工客服继续处理。"
     else:
         try:
             reply = await deepseek_client.reply(
                 user_message=state["message"],
-                intent=state["intent"],
+                intent=intent,
                 conversation_id=state.get("conversation_id"),
             )
         except AIClientError:
-            reply = fallback_reply(state["intent"])
+            reply = fallback_reply(intent)
 
-    return {**state, "reply": reply}
+    return {**state, "reply": reply, "route": state.get("route") or "generate"}
+
+
+# ---- Graph ----
 
 
 def build_chat_graph():
     graph = StateGraph(ChatState)
+
+    graph.add_node("slot_fill", slot_fill_node)
     graph.add_node("classify_intent", classify_node)
+    graph.add_node("check_slots", check_slots_node)
+    graph.add_node("clarify", clarify_node)
+    graph.add_node("human_transfer", human_transfer_node)
+    graph.add_node("lookup_order", lookup_order_node)
+    graph.add_node("knowledge", knowledge_node)
+    graph.add_node("ticket", ticket_node)
     graph.add_node("generate_reply", generate_reply_node)
-    graph.set_entry_point("classify_intent")
-    graph.add_edge("classify_intent", "generate_reply")
+
+    graph.set_entry_point("slot_fill")
+
+    graph.add_conditional_edges(
+        "slot_fill",
+        lambda state: "skip_classify" if state.get("pending_intent") else "do_classify",
+        {
+            "skip_classify": "check_slots",
+            "do_classify": "classify_intent",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "classify_intent",
+        route_after_classify,
+        {
+            "human_transfer": "human_transfer",
+            "clarify": "clarify",
+            "check_slots": "check_slots",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "check_slots",
+        route_after_slots,
+        {
+            "clarify": "clarify",
+            "business_tool": "lookup_order",
+            "generate": "generate_reply",
+        },
+    )
+
+    graph.add_edge("clarify", END)
+    graph.add_edge("human_transfer", END)
+    graph.add_edge("lookup_order", "generate_reply")
+    graph.add_edge("knowledge", END)
+    graph.add_edge("ticket", END)
     graph.add_edge("generate_reply", END)
+
     return graph.compile()
 
 
 chat_graph = build_chat_graph()
+
+
+def _need_human(intent: str) -> bool:
+    return intent in {"transfer_human", "complaint"}
 
 
 async def run_chat_graph(
@@ -86,15 +329,23 @@ async def run_chat_graph(
     message: str,
     conversation_id: Optional[str],
     channel: str,
+    conversation_context: Optional[dict] = None,
 ) -> AIResponse:
-    result = await chat_graph.ainvoke(
-        {
-            "user_id": user_id,
-            "message": message,
-            "conversation_id": conversation_id,
-            "channel": channel,
-        }
-    )
+    log.info(f"[graph] START user={user_id} msg={message!r} conv={conversation_id}")
+    initial_state: dict[str, Any] = {
+        "user_id": user_id,
+        "message": message,
+        "conversation_id": conversation_id,
+        "channel": channel,
+        "conversation_context": conversation_context or {},
+    }
+
+    result = await chat_graph.ainvoke(initial_state)
+
+    log.info(f"[graph] END intent={result.get('intent')} conf={result.get('confidence')} route={result.get('route')} reply={result.get('reply', '')[:60]}")
+
+    pending = result.get("pending_intent")
+    missing = result.get("missing_slots", [])
 
     return AIResponse(
         reply=result["reply"],
@@ -102,5 +353,14 @@ async def run_chat_graph(
         cards=[],
         intent=result["intent"],
         confidence=result["confidence"],
-        need_human=result["need_human"],
+        need_human=_need_human(result["intent"]),
+        risk_level=result.get("risk_level", "low"),
+        trace_id=result.get("trace_id"),
+        route=result.get("route"),
+        ticket_id=result.get("ticket_id"),
+        tools_used=result.get("tools_used", []),
+        sources=result.get("sources", []),
+        pending_intent=pending if missing else None,
+        missing_slots=missing if pending else [],
+        slots=result.get("slots", {}),
     )

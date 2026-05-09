@@ -7,13 +7,7 @@ export function requestLogger(logger: winston.Logger) {
 
     res.on('finish', () => {
       const duration = Date.now() - start
-      logger.info({
-        method: req.method,
-        url: req.url,
-        status: res.statusCode,
-        duration: `${duration}ms`,
-        ip: req.ip
-      })
+      logger.info(`${req.method} ${req.url} ${res.statusCode} ${duration}ms ip=${req.ip || '-'}`)
     })
 
     next()

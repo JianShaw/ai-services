@@ -39,6 +39,11 @@ chatApi.interceptors.response.use(
 )
 
 export const chatApiEndpoints = {
+  // 获取用户会话列表
+  getUserConversations: async (userId: string): Promise<Conversation[]> => {
+    return chatApi.get('/conversations', { params: { userId } })
+  },
+
   // 发送消息
   sendMessage: async (data: SendMessageRequest): Promise<AIResponse> => {
     return chatApi.post('/messages', data)

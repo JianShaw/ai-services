@@ -41,12 +41,12 @@ export const agentApiEndpoints = {
   },
 
   // 接管会话
-  takeoverConversation: async (data: TakeoverRequest): Promise<void> => {
+  takeoverConversation: async (data: TakeoverRequest): Promise<Conversation> => {
     return agentApi.post('/takeover', data)
   },
 
   // 客服回复
-  sendReply: async (data: AgentReplyRequest): Promise<void> => {
+  sendReply: async (data: AgentReplyRequest): Promise<Message> => {
     return agentApi.post('/reply', data)
   },
 

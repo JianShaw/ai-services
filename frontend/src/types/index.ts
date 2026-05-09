@@ -5,7 +5,7 @@ export interface Message {
   conversationId: string
   senderType: 'user' | 'agent' | 'ai'
   content: string
-  messageType: 'text' | 'card' | 'image'
+  messageType: 'text' | 'card' | 'image' | 'action'
   metadata?: Record<string, any>
   timestamp: string
 }
@@ -14,7 +14,7 @@ export interface Conversation {
   id: string
   userId: string
   channel: string
-  status: 'active' | 'transferred' | 'closed'
+  status: 'active' | 'transferred' | 'assigned' | 'closed'
   currentIntent: string
   summary?: string
   assignedAgentId?: string
@@ -77,6 +77,12 @@ export interface AIResponse {
   intent?: string
   confidence?: number
   needHuman?: boolean
+  riskLevel?: 'low' | 'medium' | 'high'
+  traceId?: string
+  route?: string
+  ticketId?: string
+  toolsUsed?: string[]
+  sources?: Array<Record<string, any>>
 }
 
 export interface Card {
@@ -129,7 +135,24 @@ export interface AgentReplyRequest {
 
 export interface CreateTicketRequest {
   conversationId: string
+  userId: string
   type: string
   priority: 'low' | 'medium' | 'high'
   description: string
+}
+
+export interface HumanTransferPayload {
+  conversationId: string
+  userId: string
+  reason: string
+  riskLevel: 'low' | 'medium' | 'high'
+  route: string
+}
+
+export interface SocketNewMessagePayload {
+  id: string
+  type: 'ai' | 'agent'
+  content: string
+  timestamp: string
+  metadata: Record<string, any>
 }
