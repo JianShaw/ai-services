@@ -1,9 +1,7 @@
 from typing import Optional
 
-import httpx
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
 
 from app.config.settings import settings
 from app.services.intent_service import IntentResult, INTENTS
@@ -11,77 +9,6 @@ from app.services.intent_service import IntentResult, INTENTS
 
 class AIClientError(RuntimeError):
     pass
-
-
-class DeepSeekChatClient:
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model_name: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ):
-        self.api_key = api_key or settings.openai_api_key
-        self.base_url = (base_url or settings.openai_base_url).rstrip("/")
-        self.model_name = model_name or settings.model_name
-        self.timeout = timeout or settings.ai_request_timeout
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(self.api_key)
-
-    async def reply(self, user_message: str, intent: str, conversation_id: Optional[str]) -> str:
-        if not self.is_configured:
-            raise AIClientError("OPENAI_API_KEY is not configured")
-
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an enterprise customer service AI assistant. "
-                        "Reply in concise, helpful Chinese. Ask for missing order "
-                        "numbers when needed. Do not invent order status, logistics, "
-                        "refund progress, or account data."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Conversation ID: {conversation_id or 'new'}\n"
-                        f"Detected intent: {intent}\n"
-                        f"Customer message: {user_message}"
-                    ),
-                },
-            ],
-            "temperature": 0.3,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AIClientError(str(exc)) from exc
-
-        data = response.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AIClientError("AI response did not include a chat message") from exc
-
-        return content.strip()
-
-
-deepseek_client = DeepSeekChatClient()
 
 
 # --- LLM intent classification via langchain-openai ---
@@ -104,6 +31,27 @@ CLASSIFY_SYSTEM_PROMPT = (
 CLASSIFY_PROMPT = ChatPromptTemplate.from_messages([
     ("system", CLASSIFY_SYSTEM_PROMPT),
     ("user", "客户消息：{message}"),
+])
+
+
+REPLY_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        (
+            "You are an enterprise customer service AI assistant. "
+            "Reply in concise, helpful Chinese. Ask for missing order numbers "
+            "when needed. Do not invent order status, logistics, refund progress, "
+            'or account data. Return only JSON: {"reply":"..."}'
+        ),
+    ),
+    (
+        "user",
+        (
+            "Conversation ID: {conversation_id}\n"
+            "Detected intent: {intent}\n"
+            "Customer message: {message}"
+        ),
+    ),
 ])
 
 
@@ -145,7 +93,26 @@ def _parse_classification(raw: str) -> IntentResult:
     )
 
 
+def _parse_reply(raw: str) -> str:
+    import json
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise AIClientError("AI response did not include valid JSON") from exc
+
+    reply = data.get("reply")
+    if not isinstance(reply, str) or not reply.strip():
+        raise AIClientError("AI response did not include a reply") from None
+    return reply.strip()
+
+
 async def classify_via_llm(message: str) -> IntentResult:
+    """通过 LLM 对用户消息进行意图分类。
+
+    当规则匹配未命中时，作为兜底分类手段调用。
+    使用 LangChain LCEL 管道语法：CLASSIFY_PROMPT | LLM，
+    执行流程为 {"message": ...} → 模板渲染 → LLM 调用 → 返回 AIMessage。
+    """
     import logging
     _log = logging.getLogger(__name__)
     if not settings.openai_api_key:
@@ -154,6 +121,7 @@ async def classify_via_llm(message: str) -> IntentResult:
             intent="unknown", confidence=0.3, source="llm", reason="no_api_key",
         )
 
+    # LCEL 管道：输入 dict → ChatPromptTemplate 渲染 → ChatOpenAI 调用 → AIMessage
     chain = CLASSIFY_PROMPT | _get_classify_llm()
     _log.info(f"[llm] calling classify for: {message!r}")
     response = await chain.ainvoke({"message": message})
@@ -161,3 +129,23 @@ async def classify_via_llm(message: str) -> IntentResult:
     raw = response.content if hasattr(response, "content") else str(response)
     _log.info(f"[llm] raw response: {raw!r}")
     return _parse_classification(raw)
+
+
+async def reply_via_llm(user_message: str, intent: str, conversation_id: Optional[str]) -> str:
+    """通过 LLM 生成兜底回复。
+
+    当订单查询无结果或意图无法匹配具体业务时调用。
+    LCEL 管道同上：REPLY_PROMPT | LLM。
+    """
+    if not settings.openai_api_key:
+        raise AIClientError("OPENAI_API_KEY is not configured")
+
+    chain = REPLY_PROMPT | _get_classify_llm()
+    response = await chain.ainvoke({
+        "conversation_id": conversation_id or "new",
+        "intent": intent,
+        "message": user_message,
+    })
+
+    raw = response.content if hasattr(response, "content") else str(response)
+    return _parse_reply(raw)

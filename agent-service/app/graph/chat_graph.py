@@ -7,7 +7,7 @@ from langgraph.graph import END, StateGraph
 from app.api.chat_types import AIResponse
 from app.config.settings import settings
 from app.models.database import async_session_maker
-from app.services.ai_client import AIClientError, deepseek_client
+from app.services.ai_client import AIClientError, reply_via_llm
 from app.services.intent_service import (
     INTENT_SLOTS,
     IntentResult,
@@ -262,12 +262,22 @@ async def generate_reply_node(state: ChatState) -> ChatState:
         reply = f"没有查询到订单 {order_id}。请确认订单号是否正确，或联系人工客服继续处理。"
     else:
         try:
-            reply = await deepseek_client.reply(
+            log.info(
+                "[reply_llm] ENTER fallback LLM reply: intent=%s conf=%s route=%s conv=%s msg=%r",
+                intent,
+                state.get("confidence"),
+                state.get("route"),
+                state.get("conversation_id"),
+                state["message"],
+            )
+            reply = await reply_via_llm(
                 user_message=state["message"],
                 intent=intent,
                 conversation_id=state.get("conversation_id"),
             )
-        except AIClientError:
+            log.info("[reply_llm] SUCCESS fallback LLM reply: intent=%s reply=%r", intent, reply[:120])
+        except AIClientError as exc:
+            log.warning("[reply_llm] FAILED fallback LLM reply, using static fallback: intent=%s error=%s", intent, exc)
             reply = fallback_reply(intent)
 
     return {**state, "reply": reply, "route": state.get("route") or "generate"}
