@@ -6,7 +6,10 @@ from sqlalchemy import select
 from app.models.database import Order, OrderItem, async_session_maker
 
 
-ORDER_NO_PATTERN = re.compile(r"\bORD-\d{8}-\d{4}\b", re.IGNORECASE)
+ORDER_NO_PATTERN = re.compile(
+    r"(?<![A-Z0-9])ORD-\d{8}-\d{4}(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 
 
 def extract_order_no(message: str) -> Optional[str]:

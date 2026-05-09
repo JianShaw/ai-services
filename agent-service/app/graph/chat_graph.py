@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Optional, TypedDict
 from uuid import uuid4
@@ -27,6 +26,10 @@ log = logging.getLogger(__name__)
 
 
 class ChatState(TypedDict, total=False):
+    """LangGraph 在各节点之间传递的状态对象。
+
+    每个节点只读写自己关心的字段，最后由 run_chat_graph 组装成 AIResponse。
+    """
     user_id: str
     message: str
     conversation_id: Optional[str]
@@ -50,6 +53,7 @@ class ChatState(TypedDict, total=False):
 
 
 def fallback_reply(intent: str) -> str:
+    """当模型不可用、低置信度或需要兜底时，按意图返回固定话术。"""
     replies = {
         "check_order": "关于您的订单，我可以帮您查询。请提供订单号，我会继续为您确认订单信息。",
         "check_logistics": "我可以帮您查询物流信息。请提供订单号，我会为您确认最新物流状态。",
@@ -63,17 +67,11 @@ def fallback_reply(intent: str) -> str:
     return replies.get(intent, replies["unknown"])
 
 
-def format_date_reply() -> str:
-    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    now = datetime.now(timezone(timedelta(hours=8)))
-    return f"今天是 {now.strftime('%Y-%m-%d')}，{weekdays[now.weekday()]}。"
-
-
 # ---- Nodes ----
 
 
 async def slot_fill_node(state: ChatState) -> ChatState:
-    """Entry node: check if we are in a multi-turn slot-filling flow."""
+    """图入口节点：检查当前会话是否处于多轮补槽流程。"""
     ctx = state.get("conversation_context", {})
     pending_intent = ctx.get("pending_intent")
     missing_slots = ctx.get("missing_slots", [])
@@ -81,6 +79,7 @@ async def slot_fill_node(state: ChatState) -> ChatState:
     log.info(f"[slot_fill] pending={pending_intent} missing={missing_slots} existing_slots={existing_slots}")
 
     if pending_intent and missing_slots:
+        # 上一轮已经确定了意图，但还缺必填槽位；本轮优先当作槽位补充处理。
         result = await classify_intent(
             message=state["message"],
             pending_intent=pending_intent,
@@ -102,12 +101,15 @@ async def slot_fill_node(state: ChatState) -> ChatState:
 
 
 def _calc_missing(intent: str, slots: dict[str, str]) -> list[str]:
+    """根据意图的槽位定义，找出还没有填充的必填槽位。"""
     schema = INTENT_SLOTS.get(intent, {})
     return [name for name, (_, required) in schema.items() if required and not slots.get(name)]
 
 
 async def classify_node(state: ChatState) -> ChatState:
+    """意图分类节点：对用户消息进行意图识别和槽位抽取，计算缺失的必填槽位。"""
     log.info(f"[classify] msg={state['message']!r}")
+    # 调用分类服务，依次走 规则匹配 → LLM 回退
     result = await classify_intent(message=state["message"])
     log.info(f"[classify] result: intent={result.intent} conf={result.confidence} source={result.source} reason={result.reason} slots={result.slots}")
     return {
@@ -119,14 +121,17 @@ async def classify_node(state: ChatState) -> ChatState:
         "intent_reason": result.reason,
         "slots": result.slots,
         "classification_source": result.source,
+        # 重置下游节点状态，避免残留旧数据
         "order": None,
         "tools_used": [],
         "sources": [],
+        # 根据意图的槽位定义，计算还缺少哪些必填字段
         "missing_slots": _calc_missing(result.intent, result.slots),
     }
 
 
 def route_after_classify(state: ChatState) -> str:
+    """分类后路由：高风险转人工，低置信度澄清，其余检查槽位。"""
     intent = state["intent"]
     confidence = state.get("confidence", 0)
     if intent in {"transfer_human", "complaint"}:
@@ -143,6 +148,7 @@ def route_after_classify(state: ChatState) -> str:
 
 
 async def check_slots_node(state: ChatState) -> ChatState:
+    """检查业务必填参数是否齐全；不齐则生成追问并记录 pending_intent。"""
     missing = state.get("missing_slots", [])
     log.info(f"[check_slots] intent={state['intent']} missing={missing}")
     if missing:
@@ -157,6 +163,7 @@ async def check_slots_node(state: ChatState) -> ChatState:
 
 
 def route_after_slots(state: ChatState) -> str:
+    """槽位检查后的路由：继续追问、调用业务工具或直接生成回复。"""
     if state.get("pending_intent") and state.get("missing_slots"):
         return "clarify"
     intent = state["intent"]
@@ -166,6 +173,7 @@ def route_after_slots(state: ChatState) -> str:
 
 
 async def clarify_node(state: ChatState) -> ChatState:
+    """澄清节点：保留前面生成好的追问回复，标记当前路由。"""
     return {
         **state,
         "route": "clarify",
@@ -174,6 +182,7 @@ async def clarify_node(state: ChatState) -> ChatState:
 
 
 async def human_transfer_node(state: ChatState) -> ChatState:
+    """转人工节点：生成固定转人工回复，并记录使用了转人工工具。"""
     return {
         **state,
         "route": "human_transfer",
@@ -183,6 +192,7 @@ async def human_transfer_node(state: ChatState) -> ChatState:
 
 
 async def lookup_order_node(state: ChatState) -> ChatState:
+    """订单查询节点：根据 slots.order_id 查询订单快照，供后续回复格式化使用。"""
     order_id = (state.get("slots") or {}).get("order_id")
     if not order_id:
         return {**state, "order": None, "route": "business_tool", "tools_used": []}
@@ -196,6 +206,7 @@ async def lookup_order_node(state: ChatState) -> ChatState:
 
 
 async def knowledge_node(state: ChatState) -> ChatState:
+    """知识库节点：从知识库检索答案，目前图里未作为默认路由使用。"""
     reply, sources = await answer_from_knowledge(state["message"])
     return {
         **state,
@@ -207,6 +218,7 @@ async def knowledge_node(state: ChatState) -> ChatState:
 
 
 async def ticket_node(state: ChatState) -> ChatState:
+    """工单节点：创建售后工单，目前图里未作为默认路由使用。"""
     async with async_session_maker() as session:
         from app.services.ticket_service import create_ticket as create_ticket_record
 
@@ -230,6 +242,7 @@ async def ticket_node(state: ChatState) -> ChatState:
 
 
 async def generate_reply_node(state: ChatState) -> ChatState:
+    """最终回复节点：优先使用订单数据格式化回复，否则调用大模型或固定兜底话术。"""
     intent = state["intent"]
     slots = state.get("slots", {})
     order = state.get("order")
@@ -264,6 +277,12 @@ async def generate_reply_node(state: ChatState) -> ChatState:
 
 
 def build_chat_graph():
+    """构建客服对话状态图。
+
+    主路径：
+    slot_fill -> classify_intent -> check_slots -> lookup_order/generate_reply
+    其中澄清和转人工会提前结束。
+    """
     graph = StateGraph(ChatState)
 
     graph.add_node("slot_fill", slot_fill_node)
@@ -280,6 +299,7 @@ def build_chat_graph():
 
     graph.add_conditional_edges(
         "slot_fill",
+        # 有 pending_intent 说明上一轮在等用户补参数，本轮跳过重新分类。
         lambda state: "skip_classify" if state.get("pending_intent") else "do_classify",
         {
             "skip_classify": "check_slots",
@@ -289,6 +309,7 @@ def build_chat_graph():
 
     graph.add_conditional_edges(
         "classify_intent",
+        # 根据意图风险和置信度决定转人工、澄清还是进入槽位检查。
         route_after_classify,
         {
             "human_transfer": "human_transfer",
@@ -299,6 +320,7 @@ def build_chat_graph():
 
     graph.add_conditional_edges(
         "check_slots",
+        # 槽位齐全的业务意图进入订单工具，否则继续澄清或直接生成回复。
         route_after_slots,
         {
             "clarify": "clarify",
@@ -321,6 +343,7 @@ chat_graph = build_chat_graph()
 
 
 def _need_human(intent: str) -> bool:
+    """API 响应中的 need_human 标记。"""
     return intent in {"transfer_human", "complaint"}
 
 
@@ -331,6 +354,7 @@ async def run_chat_graph(
     channel: str,
     conversation_context: Optional[dict] = None,
 ) -> AIResponse:
+    """外部调用入口：运行 LangGraph，并把最终 state 转换成 API 响应模型。"""
     log.info(f"[graph] START user={user_id} msg={message!r} conv={conversation_id}")
     initial_state: dict[str, Any] = {
         "user_id": user_id,
@@ -347,6 +371,7 @@ async def run_chat_graph(
     pending = result.get("pending_intent")
     missing = result.get("missing_slots", [])
 
+    # 只有仍然缺槽位时，才把 pending 状态返回给 API 层保存到会话中。
     return AIResponse(
         reply=result["reply"],
         reply_type="text",

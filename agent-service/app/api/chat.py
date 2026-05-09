@@ -90,8 +90,11 @@ async def process_message_with_agent(
 
 @router.post("/messages", response_model=AIResponse)
 async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(get_db)):
+    """接收用户消息的核心接口，执行完整的对话处理流程。"""
     log.info(f"[POST /messages] user={request.user_id} conv={request.conversation_id} msg={request.message!r}")
     try:
+        # ── 第一阶段：会话准备 ──
+        # 如果没有传 conversation_id 则自动生成，首次访问时自动创建会话
         conversation_id = request.conversation_id or f"conv_{uuid4().hex}"
         conversation = await db.get(Conversation, conversation_id)
         current_time = now_utc()
@@ -107,6 +110,7 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             )
             db.add(conversation)
 
+        # 持久化用户消息到数据库
         user_message = Message(
             id=f"msg_{uuid4().hex}",
             conversation_id=conversation_id,
@@ -120,6 +124,8 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
         )
         db.add(user_message)
 
+        # ── 第二阶段：构建上下文 & 调用 Graph ──
+        # 从数据库恢复上一次未完成的槽位填充状态，传入 graph 以支持多轮追问
         conv_context = {
             "pending_intent": conversation.pending_intent,
             "missing_slots": conversation.missing_slots or [],
@@ -128,6 +134,7 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
 
         log.info(f"[POST /messages] conv_context: pending_intent={conv_context.get('pending_intent')} missing_slots={conv_context.get('missing_slots')}")
 
+        # 执行 chat graph：slot_fill → classify → check_slots → lookup_order → generate_reply
         response = await process_message_with_agent(
             user_id=request.user_id,
             message=request.message,
@@ -136,6 +143,8 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             conversation_context=conv_context,
         )
 
+        # ── 第三阶段：持久化 AI 回复 ──
+        # 将 AI 的回复及完整元数据（意图、置信度、路由、trace 等）写入消息表
         ai_message = Message(
             id=f"msg_{uuid4().hex}",
             conversation_id=conversation_id,
@@ -158,13 +167,18 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
         )
         db.add(ai_message)
 
+        # ── 第四阶段：更新会话状态 ──
         conversation.current_intent = response.intent
+        # 需要转人工时，将状态标记为 transferred
         conversation.status = "transferred" if response.need_human else conversation.status
+
         if response.pending_intent:
+            # 槽位未填完：保存 pending_intent + 缺失槽位 + 已填槽位，下轮继续追问
             conversation.pending_intent = response.pending_intent
             conversation.missing_slots = response.missing_slots
             conversation.context_data = {"slots": response.slots}
         else:
+            # 槽位已填完或无需填槽：清空补槽状态
             conversation.pending_intent = None
             conversation.missing_slots = None
             conversation.context_data = None

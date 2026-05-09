@@ -140,21 +140,35 @@ async def classify_intent(
     missing_slots: Optional[list[str]] = None,
     existing_slots: Optional[dict[str, str]] = None,
 ) -> IntentResult:
-    # 1. Multi-turn slot filling: don't re-classify
+    """识别用户消息的客服意图，并尽量抽取业务槽位。
+
+    message: 当前用户输入。
+    pending_intent: 上一轮已经识别出的意图；存在时表示当前处于多轮补槽流程。
+    missing_slots: 上一轮还缺少的必填槽位，例如 order_id、new_address。
+    existing_slots: 已经收集到的槽位，本轮会在此基础上合并新增槽位。
+    """
+
+    # 1. 多轮补槽：上一轮已经确定意图时，本轮只尝试补齐缺失参数，不重新判断意图。
     if pending_intent and missing_slots:
+        # 先用结构化规则抽槽位。目前主要支持从文本里抽订单号。
         filled = extract_slots_from_message(message, missing_slots)
         merged = {**(existing_slots or {}), **filled}
 
+        # 如果没有抽到结构化槽位，就把用户原文作为第一个缺失槽位的值。
+        # 这适合地址、原因等自由文本；订单号等强格式字段后续仍建议再做校验。
         if not filled and missing_slots:
             first_missing = missing_slots[0]
             merged[first_missing] = message.strip()
 
+        # 计算补槽后是否仍有必填项缺失。当前返回值里不直接使用，
+        # 调用方 chat_graph._calc_missing 会再次计算并决定是否继续追问。
         slot_schema = INTENT_SLOTS.get(pending_intent, {})
         still_missing = [
             name for name, (_, required) in slot_schema.items()
             if required and not merged.get(name)
         ]
 
+        # 补槽场景下沿用上一轮意图，并标记来源为 slot_fill，方便日志和链路追踪。
         return IntentResult(
             intent=pending_intent,
             confidence=0.9,
@@ -163,12 +177,12 @@ async def classify_intent(
             reason="multi_turn_slot_fill",
         )
 
-    # 2. Rule-based fast path
+    # 2. 规则识别快速路径：优先用关键词和订单号判断，成本低、延迟小。
     rule_result = classify_by_rules(message)
     if rule_result is not None:
         return rule_result
 
-    # 3. LLM fallback
+    # 3. LLM 兜底：规则没有命中时，再调用模型做开放式意图分类。
     import logging
     _log = logging.getLogger(__name__)
     _log.info(f"[intent] rule miss, invoking LLM for: {message!r}")
@@ -176,12 +190,14 @@ async def classify_intent(
         from app.services.ai_client import classify_via_llm
         llm_result = await classify_via_llm(message)
         _log.info(f"[intent] LLM result: intent={llm_result.intent}, conf={llm_result.confidence}, source={llm_result.source}, reason={llm_result.reason}")
+        # 防御模型返回未定义 intent，避免后续路由遇到未知枚举值。
         if llm_result.intent not in INTENTS:
             llm_result = IntentResult(
                 intent="unknown", confidence=0.3, source="llm", reason="invalid_intent_fallback",
             )
         return llm_result
     except Exception as e:
+        # 模型调用失败时降级为 unknown，让后续流程走低置信度/转人工等兜底分支。
         import logging
         logging.getLogger(__name__).warning(f"LLM classification failed: {e}")
         return IntentResult(
