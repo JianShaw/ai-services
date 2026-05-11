@@ -204,9 +204,47 @@ def _detect_source_type(filename: str) -> str:
     return {"pdf": "pdf", "md": "markdown", "markdown": "markdown", "txt": "txt"}.get(ext, "txt")
 
 
+def _is_cjk(char: str) -> bool:
+    return "一" <= char <= "鿿"
+
+
+def _should_join_lines(previous: str, current: str) -> bool:
+    if not previous or not current:
+        return False
+    if previous.endswith(("。", "！", "？", "：", "；", ".", "!", "?", ":")):
+        return False
+    return _is_cjk(previous[-1]) and _is_cjk(current[0])
+
+
+def _normalize_extracted_text(text: str) -> str:
+    lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
+    paragraphs: list[str] = []
+    current = ""
+
+    for line in lines:
+        if not line:
+            if current:
+                paragraphs.append(current)
+                current = ""
+            continue
+
+        if current and _should_join_lines(current, line):
+            current += line
+        else:
+            if current:
+                paragraphs.append(current)
+            current = line
+
+    if current:
+        paragraphs.append(current)
+
+    return "\n".join(paragraphs)
+
+
 def _extract_uploaded_text(content_bytes: bytes, source_type: str) -> str:
     if source_type == "pdf":
-        return _extract_pdf_text(content_bytes)
+        raw_text = _extract_pdf_text(content_bytes)
+        return _normalize_extracted_text(raw_text)
 
     try:
         return content_bytes.decode("utf-8")

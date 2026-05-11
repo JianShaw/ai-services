@@ -160,30 +160,35 @@ async def search_knowledge(
         if conditions:
             qdrant_filters = models.Filter(must=conditions)
 
-    retriever = store.as_retriever(
-        search_type="similarity_score_threshold",
-        search_kwargs={
-            "k": k,
-            "score_threshold": settings.knowledge_score_threshold,
-            "filter": qdrant_filters,
-        },
+    docs_with_scores = await store.asimilarity_search_with_score(
+        query,
+        k=k,
+        filter=qdrant_filters,
     )
-    docs = await retriever.ainvoke(query)
+
     hits: list[KnowledgeHit] = []
-    for doc in docs:
+    for doc, score in docs_with_scores:
         meta = doc.metadata or {}
+        hit_score = float(score)
+        if hit_score < settings.knowledge_score_threshold:
+            continue
         hits.append(
             KnowledgeHit(
                 chunk_id=meta.get("chunk_id", ""),
                 document_id=meta.get("document_id", ""),
                 content=doc.page_content,
-                score=meta.get("score", 0.0),
+                score=hit_score,
                 title=meta.get("title", ""),
                 category=meta.get("category", ""),
                 metadata=meta,
             )
         )
-    log.info("[qdrant] search '%s' → %d hits", query[:40], len(hits))
+
+    top_summary = ", ".join(
+        f"doc={h.document_id[:12]} chunk={h.metadata.get('chunk_index', '?')} score={h.score:.2f}"
+        for h in hits[:3]
+    )
+    log.info("[qdrant] search query='%s' hits=%d top=[%s]", query[:40], len(hits), top_summary)
     return hits
 
 

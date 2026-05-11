@@ -16,6 +16,11 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
+def _preview(value: str, limit: int = 80) -> str:
+    compact = " ".join((value or "").split())
+    return compact[:limit] + ("..." if len(compact) > limit else "")
+
+
 class SendMessageRequest(BaseModel):
     conversation_id: Optional[str] = None
     user_id: str
@@ -91,7 +96,8 @@ async def process_message_with_agent(
 @router.post("/messages", response_model=AIResponse)
 async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(get_db)):
     """接收用户消息的核心接口，执行完整的对话处理流程。"""
-    log.info(f"[POST /messages] user={request.user_id} conv={request.conversation_id} msg={request.message!r}")
+    log.info("[POST /messages] user=%s conv=%s msg_preview=%s",
+             request.user_id, request.conversation_id, _preview(request.message))
     try:
         # ── 第一阶段：会话准备 ──
         # 如果没有传 conversation_id 则自动生成，首次访问时自动创建会话
@@ -126,7 +132,7 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             }
             for message in history_messages
         ]
-        log.info("[POST /messages] history_count=%s history=%r", len(history), history)
+        log.info("[POST /messages] history_count=%d", len(history))
 
         user_message = Message(
             id=f"msg_{uuid4().hex}",

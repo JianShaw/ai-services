@@ -279,7 +279,10 @@ def _score(query: str, content: str) -> int:
     return score
 
 
-async def answer_from_knowledge(query: str) -> tuple[str, list[dict[str, Any]]]:
+async def answer_from_knowledge(
+    query: str,
+    conversation_id: Optional[str] = None,
+) -> tuple[str, list[dict[str, Any]]]:
     sources = await retrieve_knowledge(query)
     if not sources:
         return (
@@ -306,7 +309,7 @@ async def answer_from_knowledge(query: str) -> tuple[str, list[dict[str, Any]]]:
         reply = await reply_via_llm(
             user_message=prompt,
             intent="knowledge_query",
-            conversation_id=None,
+            conversation_id=conversation_id,
             history=[],
         )
         return reply, sources

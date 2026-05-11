@@ -192,16 +192,19 @@ async def reply_via_llm(
         raise AIClientError("OPENAI_API_KEY is not configured")
 
     try:
+        msg_preview = user_message[:120] + "..." if len(user_message) > 120 else user_message
         log.info(
-            "[reply_llm_client] CALL model=%s base_url=%s conv=%s intent=%s msg=%r",
+            "[reply_llm_client] CALL model=%s base_url=%s conv=%s intent=%s msg_len=%d msg_preview=%s",
             settings.model_name,
             settings.openai_base_url,
             conversation_id or "new",
             intent,
-            user_message,
+            len(user_message),
+            msg_preview,
         )
         formatted_history = _format_history(history)
-        log.info("[reply_llm_client] HISTORY %r", formatted_history)
+        history_count = len(history) if history else 0
+        log.info("[reply_llm_client] HISTORY count=%d", history_count)
         chain = REPLY_PROMPT | _get_reply_llm()
         response = await chain.ainvoke({
             "intent": intent,
@@ -219,7 +222,10 @@ async def reply_via_llm(
         raise AIClientError(f"{type(exc).__name__}: {exc}") from exc
 
     raw = response.content if hasattr(response, "content") else str(response)
-    log.info("[reply_llm_client] RAW_RESPONSE %r", raw)
+    if settings.debug:
+        log.info("[reply_llm_client] RAW_RESPONSE len=%d preview=%s", len(raw), raw[:500])
+    else:
+        log.info("[reply_llm_client] RAW_RESPONSE len=%d", len(raw))
     try:
         return _parse_reply(raw)
     except AIClientError:

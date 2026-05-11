@@ -25,6 +25,11 @@ from app.services.order_service import (
 log = logging.getLogger(__name__)
 
 
+def _preview(value: str, limit: int = 80) -> str:
+    compact = " ".join((value or "").split())
+    return compact[:limit] + ("..." if len(compact) > limit else "")
+
+
 class ChatState(TypedDict, total=False):
     """LangGraph 在各节点之间传递的状态对象。
 
@@ -120,7 +125,7 @@ def _extract_order_from_history(history: list[dict]) -> Optional[str]:
 
 async def classify_node(state: ChatState) -> ChatState:
     """意图分类节点：对用户消息进行意图识别和槽位抽取，计算缺失的必填槽位。"""
-    log.info(f"[classify] msg={state['message']!r}")
+    log.info("[classify] msg_preview=%s", _preview(state["message"]))
     # 调用分类服务，依次走 规则匹配 → LLM 回退
     result = await classify_intent(message=state["message"])
     log.info(f"[classify] result: intent={result.intent} conf={result.confidence} source={result.source} reason={result.reason} slots={result.slots}")
@@ -245,7 +250,10 @@ async def lookup_order_node(state: ChatState) -> ChatState:
 
 async def knowledge_node(state: ChatState) -> ChatState:
     """知识库节点：从知识库检索答案，目前图里未作为默认路由使用。"""
-    reply, sources = await answer_from_knowledge(state["message"])
+    reply, sources = await answer_from_knowledge(
+        query=state["message"],
+        conversation_id=state.get("conversation_id"),
+    )
     return {
         **state,
         "route": "knowledge",
@@ -311,12 +319,12 @@ async def generate_reply_node(state: ChatState) -> ChatState:
     else:
         try:
             log.info(
-                "[reply_llm] ENTER fallback LLM reply: intent=%s conf=%s route=%s conv=%s msg=%r",
+                "[reply_llm] ENTER fallback LLM reply: intent=%s conf=%s route=%s conv=%s msg_preview=%s",
                 intent,
                 state.get("confidence"),
                 state.get("route"),
                 state.get("conversation_id"),
-                state["message"],
+                _preview(state["message"]),
             )
             reply = await reply_via_llm(
                 user_message=state["message"],
@@ -426,9 +434,9 @@ async def run_chat_graph(
     conversation_context: Optional[dict] = None,
 ) -> AIResponse:
     """外部调用入口：运行 LangGraph，并把最终 state 转换成 API 响应模型。"""
-    log.info(f"[graph] START user={user_id} msg={message!r} conv={conversation_id}")
+    log.info("[graph] START user=%s msg_preview=%s conv=%s", user_id, _preview(message), conversation_id)
     history = (conversation_context or {}).get("history", [])
-    log.info("[graph] history_count=%s history=%r", len(history), history)
+    log.info("[graph] history_count=%d", len(history))
     initial_state: dict[str, Any] = {
         "user_id": user_id,
         "message": message,
