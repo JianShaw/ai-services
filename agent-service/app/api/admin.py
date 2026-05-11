@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 import re
 from typing import Any, Optional
@@ -216,10 +217,14 @@ def _should_join_lines(previous: str, current: str) -> bool:
     return _is_cjk(previous[-1]) and _is_cjk(current[0])
 
 
+_log = logging.getLogger(__name__)
+
+
 def _normalize_extracted_text(text: str) -> str:
     lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
     paragraphs: list[str] = []
     current = ""
+    join_count = 0
 
     for line in lines:
         if not line:
@@ -230,6 +235,7 @@ def _normalize_extracted_text(text: str) -> str:
 
         if current and _should_join_lines(current, line):
             current += line
+            join_count += 1
         else:
             if current:
                 paragraphs.append(current)
@@ -238,6 +244,8 @@ def _normalize_extracted_text(text: str) -> str:
     if current:
         paragraphs.append(current)
 
+    _log.info("[text_normalize] lines=%d paragraphs=%d joins=%d chars=%d→%d",
+              len(lines), len(paragraphs), join_count, len(text), len("\n".join(paragraphs)))
     return "\n".join(paragraphs)
 
 
