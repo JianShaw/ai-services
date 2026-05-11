@@ -158,8 +158,8 @@ def route_after_classify(state: ChatState) -> str:
         log.info(f"[route] → human_transfer (intent={intent})")
         return "human_transfer"
     if confidence < 0.4:
-        log.info(f"[route] → human_transfer (conf={confidence} < 0.4)")
-        return "human_transfer"
+        log.info(f"[route] → generate_reply (conf={confidence} < 0.4)")
+        return "generate"
     if intent == "unknown":
         log.info(f"[route] → generate_reply (unknown intent)")
         return "generate"

@@ -46,6 +46,7 @@ REPLY_SYSTEM_PROMPT = (
     "- 如果缺少关键信息（如订单号），礼貌地请用户提供\n"
     "- 涉及退款、投诉等敏感问题，表达同理心并主动提供解决方案\n"
     "- 回复控制在 3 句话以内，避免冗长\n"
+    "- 不要使用表情符号，不要假设用户在测试，始终保持专业客服态度\n"
 )
 
 REPLY_PROMPT = ChatPromptTemplate.from_messages([
