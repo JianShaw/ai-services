@@ -174,10 +174,21 @@ def route_after_slots(state: ChatState) -> str:
 
 async def clarify_node(state: ChatState) -> ChatState:
     """澄清节点：保留前面生成好的追问回复，标记当前路由。"""
+    reply = state.get("reply")
+    if not reply:
+        log.info(
+            "[clarify] missing reply, using default clarify prompt: intent=%s conf=%s reason=%s",
+            state.get("intent"),
+            state.get("confidence"),
+            state.get("intent_reason"),
+        )
+        reply = fallback_reply("unknown")
+
     return {
         **state,
         "route": "clarify",
         "tools_used": [],
+        "reply": reply,
     }
 
 
@@ -274,10 +285,19 @@ async def generate_reply_node(state: ChatState) -> ChatState:
                 user_message=state["message"],
                 intent=intent,
                 conversation_id=state.get("conversation_id"),
+                history=(state.get("conversation_context") or {}).get("history", []),
             )
             log.info("[reply_llm] SUCCESS fallback LLM reply: intent=%s reply=%r", intent, reply[:120])
         except AIClientError as exc:
-            log.warning("[reply_llm] FAILED fallback LLM reply, using static fallback: intent=%s error=%s", intent, exc)
+            log.warning(
+                "[reply_llm] FAILED fallback LLM reply, using static fallback: intent=%s error=%s",
+                intent,
+                exc,
+                exc_info=True,
+            )
+            reply = fallback_reply(intent)
+        except Exception:
+            log.exception("[reply_llm] CRASH fallback LLM reply, using static fallback: intent=%s", intent)
             reply = fallback_reply(intent)
 
     return {**state, "reply": reply, "route": state.get("route") or "generate"}
@@ -298,7 +318,9 @@ def build_chat_graph():
     graph.add_node("slot_fill", slot_fill_node)
     graph.add_node("classify_intent", classify_node)
     graph.add_node("check_slots", check_slots_node)
+    #澄清
     graph.add_node("clarify", clarify_node)
+    #转人工
     graph.add_node("human_transfer", human_transfer_node)
     graph.add_node("lookup_order", lookup_order_node)
     graph.add_node("knowledge", knowledge_node)
@@ -309,7 +331,7 @@ def build_chat_graph():
 
     graph.add_conditional_edges(
         "slot_fill",
-        # 有 pending_intent 说明上一轮在等用户补参数，本轮跳过重新分类。
+        # 有 pending_intent 如果有pending_intent 为skip_classify，否则do_classify
         lambda state: "skip_classify" if state.get("pending_intent") else "do_classify",
         {
             "skip_classify": "check_slots",
@@ -366,6 +388,8 @@ async def run_chat_graph(
 ) -> AIResponse:
     """外部调用入口：运行 LangGraph，并把最终 state 转换成 API 响应模型。"""
     log.info(f"[graph] START user={user_id} msg={message!r} conv={conversation_id}")
+    history = (conversation_context or {}).get("history", [])
+    log.info("[graph] history_count=%s history=%r", len(history), history)
     initial_state: dict[str, Any] = {
         "user_id": user_id,
         "message": message,

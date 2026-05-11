@@ -111,6 +111,23 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             db.add(conversation)
 
         # 持久化用户消息到数据库
+        history_result = await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc())
+            .limit(10)
+        )
+        history_messages = list(reversed(history_result.scalars().all()))
+        history = [
+            {
+                "sender_type": message.sender_type,
+                "content": message.content,
+                "created_at": format_datetime(message.created_at),
+            }
+            for message in history_messages
+        ]
+        log.info("[POST /messages] history_count=%s history=%r", len(history), history)
+
         user_message = Message(
             id=f"msg_{uuid4().hex}",
             conversation_id=conversation_id,
@@ -130,6 +147,7 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             "pending_intent": conversation.pending_intent,
             "missing_slots": conversation.missing_slots or [],
             "slots": (conversation.context_data or {}).get("slots", {}),
+            "history": history,
         }
 
         log.info(f"[POST /messages] conv_context: pending_intent={conv_context.get('pending_intent')} missing_slots={conv_context.get('missing_slots')}")

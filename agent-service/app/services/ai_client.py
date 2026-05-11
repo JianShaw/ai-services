@@ -1,10 +1,14 @@
 from typing import Optional
 
+import logging
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from app.config.settings import settings
 from app.services.intent_service import IntentResult, INTENTS
+
+log = logging.getLogger(__name__)
 
 
 class AIClientError(RuntimeError):
@@ -41,7 +45,7 @@ REPLY_PROMPT = ChatPromptTemplate.from_messages([
             "You are an enterprise customer service AI assistant. "
             "Reply in concise, helpful Chinese. Ask for missing order numbers "
             "when needed. Do not invent order status, logistics, refund progress, "
-            'or account data. Return only JSON: {"reply":"..."}'
+            'or account data. Return only JSON: {{"reply":"..."}}'
         ),
     ),
     (
@@ -49,6 +53,7 @@ REPLY_PROMPT = ChatPromptTemplate.from_messages([
         (
             "Conversation ID: {conversation_id}\n"
             "Detected intent: {intent}\n"
+            "Conversation history:\n{history}\n"
             "Customer message: {message}"
         ),
     ),
@@ -106,6 +111,20 @@ def _parse_reply(raw: str) -> str:
     return reply.strip()
 
 
+def _format_history(history: Optional[list[dict]]) -> str:
+    if not history:
+        return "(no prior messages)"
+
+    lines = []
+    for item in history[-10:]:
+        sender = item.get("sender_type") or item.get("sender") or "unknown"
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{sender}: {content}")
+    return "\n".join(lines) if lines else "(no prior messages)"
+
+
 async def classify_via_llm(message: str) -> IntentResult:
     """通过 LLM 对用户消息进行意图分类。
 
@@ -131,7 +150,12 @@ async def classify_via_llm(message: str) -> IntentResult:
     return _parse_classification(raw)
 
 
-async def reply_via_llm(user_message: str, intent: str, conversation_id: Optional[str]) -> str:
+async def reply_via_llm(
+    user_message: str,
+    intent: str,
+    conversation_id: Optional[str],
+    history: Optional[list[dict]] = None,
+) -> str:
     """通过 LLM 生成兜底回复。
 
     当订单查询无结果或意图无法匹配具体业务时调用。
@@ -140,12 +164,38 @@ async def reply_via_llm(user_message: str, intent: str, conversation_id: Optiona
     if not settings.openai_api_key:
         raise AIClientError("OPENAI_API_KEY is not configured")
 
-    chain = REPLY_PROMPT | _get_classify_llm()
-    response = await chain.ainvoke({
-        "conversation_id": conversation_id or "new",
-        "intent": intent,
-        "message": user_message,
-    })
+    try:
+        log.info(
+            "[reply_llm_client] CALL model=%s base_url=%s conv=%s intent=%s msg=%r",
+            settings.model_name,
+            settings.openai_base_url,
+            conversation_id or "new",
+            intent,
+            user_message,
+        )
+        formatted_history = _format_history(history)
+        log.info("[reply_llm_client] HISTORY %r", formatted_history)
+        chain = REPLY_PROMPT | _get_classify_llm()
+        response = await chain.ainvoke({
+            "conversation_id": conversation_id or "new",
+            "intent": intent,
+            "history": formatted_history,
+            "message": user_message,
+        })
+    except Exception as exc:
+        log.exception(
+            "[reply_llm_client] CALL_FAILED model=%s base_url=%s conv=%s intent=%s",
+            settings.model_name,
+            settings.openai_base_url,
+            conversation_id or "new",
+            intent,
+        )
+        raise AIClientError(f"{type(exc).__name__}: {exc}") from exc
 
     raw = response.content if hasattr(response, "content") else str(response)
-    return _parse_reply(raw)
+    log.info("[reply_llm_client] RAW_RESPONSE %r", raw)
+    try:
+        return _parse_reply(raw)
+    except AIClientError:
+        log.exception("[reply_llm_client] PARSE_FAILED raw=%r", raw)
+        raise
