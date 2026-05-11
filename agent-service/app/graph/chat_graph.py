@@ -106,12 +106,33 @@ def _calc_missing(intent: str, slots: dict[str, str]) -> list[str]:
     return [name for name, (_, required) in schema.items() if required and not slots.get(name)]
 
 
+def _extract_order_from_history(history: list[dict]) -> Optional[str]:
+    """从对话历史中提取最近出现的合法订单号。"""
+    from app.services.order_service import extract_order_no
+    for item in reversed(history):
+        content = item.get("content", "")
+        order_no = extract_order_no(content)
+        if order_no:
+            return order_no
+    return None
+
+
 async def classify_node(state: ChatState) -> ChatState:
     """意图分类节点：对用户消息进行意图识别和槽位抽取，计算缺失的必填槽位。"""
     log.info(f"[classify] msg={state['message']!r}")
     # 调用分类服务，依次走 规则匹配 → LLM 回退
     result = await classify_intent(message=state["message"])
     log.info(f"[classify] result: intent={result.intent} conf={result.confidence} source={result.source} reason={result.reason} slots={result.slots}")
+
+    # 当新意图需要 order_id 但当前消息没提及时，从历史对话自动补填
+    slots = dict(result.slots)
+    if "order_id" in _calc_missing(result.intent, slots):
+        history = (state.get("conversation_context") or {}).get("history", [])
+        history_order = _extract_order_from_history(history)
+        if history_order:
+            slots["order_id"] = history_order
+            log.info(f"[classify] auto-filled order_id={history_order} from history")
+
     return {
         **state,
         "trace_id": state.get("trace_id") or f"trace_{uuid4().hex}",
@@ -119,14 +140,13 @@ async def classify_node(state: ChatState) -> ChatState:
         "confidence": result.confidence,
         "risk_level": result.risk_level,
         "intent_reason": result.reason,
-        "slots": result.slots,
+        "slots": slots,
         "classification_source": result.source,
         # 重置下游节点状态，避免残留旧数据
         "order": None,
         "tools_used": [],
         "sources": [],
-        # 根据意图的槽位定义，计算还缺少哪些必填字段
-        "missing_slots": _calc_missing(result.intent, result.slots),
+        "missing_slots": _calc_missing(result.intent, slots),
     }
 
 
