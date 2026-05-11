@@ -39,7 +39,7 @@ async def create_knowledge_document(
         source_type=source_type,
         category=category,
         tenant_id=tenant_id,
-        status="active",
+        status="indexing",
         version=version,
         created_at=now,
         updated_at=now,
@@ -66,7 +66,10 @@ async def create_knowledge_document(
     await db.flush()
 
     # 写入 Qdrant 向量
-    await _upsert_chunks_to_qdrant(document, chunk_records)
+    point_ids = await _upsert_chunks_to_qdrant(document, chunk_records)
+    document.status = "active" if len(point_ids) == len(chunk_records) else "index_failed"
+    document.updated_at = datetime.utcnow()
+    await db.flush()
 
     return document, len(chunks)
 
@@ -140,7 +143,23 @@ async def update_document_status(
     await db.flush()
 
     # 同步更新 Qdrant payload 中的 status
-    if status != "active":
+    if status == "active":
+        try:
+            from app.services.qdrant_vector_service import delete_document_vectors
+            await delete_document_vectors(document_id)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("[knowledge] failed to delete Qdrant vectors before reindex")
+        chunks_result = await db.execute(
+            select(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id)
+        )
+        chunks = list(chunks_result.scalars().all())
+        point_ids = await _upsert_chunks_to_qdrant(document, chunks)
+        if len(point_ids) != len(chunks):
+            document.status = "index_failed"
+            document.updated_at = datetime.utcnow()
+            await db.flush()
+    else:
         try:
             from app.services.qdrant_vector_service import delete_document_vectors
             await delete_document_vectors(document_id)
@@ -155,7 +174,6 @@ async def delete_knowledge_document(db: AsyncSession, document_id: str) -> bool:
     document = await get_knowledge_document(db, document_id)
     if not document:
         return False
-
     # 删除 chunks
     chunks_result = await db.execute(
         select(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id)
@@ -210,8 +228,9 @@ async def retrieve_knowledge(
         from app.services.qdrant_vector_service import KnowledgeSearchFilter, search_knowledge
 
         filters = KnowledgeSearchFilter(
-            tenant_id=tenant_id,
+            tenant_id=tenant_id or "default",
             category=category,
+            status="active",
         )
         hits = await search_knowledge(query, filters=filters, top_k=limit)
         return [
@@ -229,17 +248,32 @@ async def retrieve_knowledge(
     except Exception:
         import logging
         logging.getLogger(__name__).exception("[knowledge] Qdrant search failed, falling back to local")
-        return await _retrieve_knowledge_local(query, limit)
+        return await _retrieve_knowledge_local(
+            query,
+            limit,
+            category=category,
+            tenant_id=tenant_id or "default",
+        )
 
 
-async def _retrieve_knowledge_local(query: str, limit: int = 3) -> list[dict[str, Any]]:
+async def _retrieve_knowledge_local(
+    query: str,
+    limit: int = 3,
+    category: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
     """本地 SQL 关键词打分兜底。"""
     async with async_session_maker() as session:
-        result = await session.execute(
+        stmt = (
             select(KnowledgeChunk, KnowledgeDocument)
             .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
             .where(KnowledgeDocument.status == "active")
         )
+        if tenant_id:
+            stmt = stmt.where(KnowledgeDocument.tenant_id == tenant_id)
+        if category:
+            stmt = stmt.where(KnowledgeDocument.category == category)
+        result = await session.execute(stmt)
         scored: list[tuple[int, KnowledgeChunk, KnowledgeDocument]] = []
         for chunk, document in result.all():
             score = _score(query, chunk.content)
@@ -325,6 +359,9 @@ async def reindex_document(db: AsyncSession, document_id: str) -> bool:
     document = await get_knowledge_document(db, document_id)
     if not document:
         return False
+    document.status = "indexing"
+    document.updated_at = datetime.utcnow()
+    await db.flush()
 
     # 删除旧向量
     try:
@@ -339,8 +376,14 @@ async def reindex_document(db: AsyncSession, document_id: str) -> bool:
     )
     chunks = list(result.scalars().all())
     if not chunks:
+        document.status = "active"
+        document.updated_at = datetime.utcnow()
+        await db.flush()
         return True
 
     # 重新写入
-    await _upsert_chunks_to_qdrant(document, chunks)
+    point_ids = await _upsert_chunks_to_qdrant(document, chunks)
+    document.status = "active" if len(point_ids) == len(chunks) else "index_failed"
+    document.updated_at = datetime.utcnow()
+    await db.flush()
     return True

@@ -32,6 +32,7 @@ class KnowledgeSearchFilter:
     tenant_id: Optional[str] = None
     category: Optional[str] = None
     document_id: Optional[str] = None
+    status: str = "active"
 
 
 @dataclass
@@ -155,15 +156,19 @@ async def search_knowledge(
         conditions = []
         if filters.tenant_id:
             conditions.append(
-                models.FieldCondition(key="tenant_id", match=models.MatchValue(value=filters.tenant_id))
+                models.FieldCondition(key="metadata.tenant_id", match=models.MatchValue(value=filters.tenant_id))
             )
         if filters.category:
             conditions.append(
-                models.FieldCondition(key="category", match=models.MatchValue(value=filters.category))
+                models.FieldCondition(key="metadata.category", match=models.MatchValue(value=filters.category))
             )
         if filters.document_id:
             conditions.append(
-                models.FieldCondition(key="document_id", match=models.MatchValue(value=filters.document_id))
+                models.FieldCondition(key="metadata.document_id", match=models.MatchValue(value=filters.document_id))
+            )
+        if filters.status:
+            conditions.append(
+                models.FieldCondition(key="metadata.status", match=models.MatchValue(value=filters.status))
             )
         if conditions:
             qdrant_filters = models.Filter(must=conditions)
@@ -213,7 +218,7 @@ async def delete_document_vectors(document_id: str) -> None:
                 filter=models.Filter(
                     must=[
                         models.FieldCondition(
-                            key="document_id",
+                            key="metadata.document_id",
                             match=models.MatchValue(value=document_id),
                         )
                     ]
