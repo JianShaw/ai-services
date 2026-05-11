@@ -110,7 +110,7 @@ export const useChatStore = defineStore('chat', () => {
       })
 
       const aiMessage: Message = {
-        id: `msg_${Date.now() + 1}`,
+        id: response.messageId || `msg_${Date.now() + 1}`,
         conversationId: currentConversation.value.id,
         senderType: 'ai',
         content: response.reply,

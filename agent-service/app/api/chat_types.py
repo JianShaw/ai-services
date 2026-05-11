@@ -19,3 +19,4 @@ class AIResponse(BaseModel):
     pending_intent: Optional[str] = None
     missing_slots: List[str] = []
     slots: Dict[str, Any] = {}
+    message_id: Optional[str] = None

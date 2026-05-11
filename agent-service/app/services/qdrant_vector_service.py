@@ -113,8 +113,10 @@ def get_vector_store() -> QdrantVectorStore:
 
 
 async def upsert_chunks(chunks: list[KnowledgeChunkInput]) -> list[str]:
+    """将文本块写入 Qdrant：先通过 embedding 模型将原文转为向量，再连同 metadata 一起存入集合。"""
     store = get_vector_store()
     texts = [c.content for c in chunks]
+    # metadata 随向量一起存储，后续搜索时可用于 Filter 过滤
     metadatas = [
         {
             "chunk_id": c.chunk_id,
@@ -139,9 +141,15 @@ async def search_knowledge(
     filters: Optional[KnowledgeSearchFilter] = None,
     top_k: Optional[int] = None,
 ) -> list[KnowledgeHit]:
+    """向量相似度搜索：将 query 转为 embedding，在 Qdrant 中找最近的 top_k 个文本块。
+
+    支持通过 filters 按 tenant_id / category / document_id 做 metadata 预过滤，
+    返回结果会剔除低于 knowledge_score_threshold 的低质量命中。
+    """
     store = get_vector_store()
     k = top_k or settings.knowledge_top_k
 
+    # 构建 Qdrant Filter：在向量搜索前按 metadata 字段精确匹配过滤
     qdrant_filters = None
     if filters:
         conditions = []
@@ -160,6 +168,7 @@ async def search_knowledge(
         if conditions:
             qdrant_filters = models.Filter(must=conditions)
 
+    # similarity_search_with_score 返回 (Document, score) 元组列表
     docs_with_scores = await store.asimilarity_search_with_score(
         query,
         k=k,
@@ -170,6 +179,7 @@ async def search_knowledge(
     for doc, score in docs_with_scores:
         meta = doc.metadata or {}
         hit_score = float(score)
+        # 过滤掉低于阈值的结果
         if hit_score < settings.knowledge_score_threshold:
             continue
         hits.append(
@@ -193,6 +203,7 @@ async def search_knowledge(
 
 
 async def delete_document_vectors(document_id: str) -> None:
+    """按 document_id 删除 Qdrant 中该文档的所有向量点。"""
     client = _get_qdrant_client()
     collection_name = settings.qdrant_collection_name
     try:

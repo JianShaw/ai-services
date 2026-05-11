@@ -208,6 +208,7 @@ async def send_message(request: SendMessageRequest, db: AsyncSession = Depends(g
             conversation.context_data = None
         conversation.updated_at = now_utc()
 
+        response.message_id = ai_message.id
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

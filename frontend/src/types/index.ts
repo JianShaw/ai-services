@@ -105,6 +105,7 @@ export interface AIResponse {
   ticketId?: string
   toolsUsed?: string[]
   sources?: Array<Record<string, any>>
+  messageId?: string
 }
 
 export interface Card {

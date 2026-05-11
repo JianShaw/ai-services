@@ -115,6 +115,15 @@
                 </el-button>
               </div>
             </div>
+            <!-- AI 正在思考提示 -->
+            <div v-if="chatStore.isLoading" class="message ai">
+              <div class="message-content typing-indicator">
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="typing-text">正在思考</span>
+              </div>
+            </div>
           </div>
 
           <div class="input-area">
@@ -572,5 +581,45 @@ onUnmounted(() => {
 .input-hint {
   font-size: 0.875rem;
   color: #999;
+}
+
+/* ---- Typing Indicator ---- */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.typing-indicator .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #409eff;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-indicator .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.typing-text {
+  font-size: 0.8rem;
+  color: #999;
+  margin-left: 4px;
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 </style>
