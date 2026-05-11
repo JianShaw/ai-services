@@ -38,23 +38,24 @@ CLASSIFY_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+REPLY_SYSTEM_PROMPT = (
+    "你是一名专业的电商客服助手。你的职责是根据用户的问题给出准确、友好的回复。\n\n"
+    "规则：\n"
+    "- 用简洁自然的中文回复，不要使用机械模板话术\n"
+    "- 不要编造订单状态、物流信息、退款进度等数据\n"
+    "- 如果缺少关键信息（如订单号），礼貌地请用户提供\n"
+    "- 涉及退款、投诉等敏感问题，表达同理心并主动提供解决方案\n"
+    "- 回复控制在 3 句话以内，避免冗长\n"
+)
+
 REPLY_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        (
-            "You are an enterprise customer service AI assistant. "
-            "Reply in concise, helpful Chinese. Ask for missing order numbers "
-            "when needed. Do not invent order status, logistics, refund progress, "
-            'or account data. Return only JSON: {{"reply":"..."}}'
-        ),
-    ),
+    ("system", REPLY_SYSTEM_PROMPT),
     (
         "user",
         (
-            "Conversation ID: {conversation_id}\n"
-            "Detected intent: {intent}\n"
-            "Conversation history:\n{history}\n"
-            "Customer message: {message}"
+            "当前意图：{intent}\n"
+            "对话历史：\n{history}\n"
+            "用户消息：{message}"
         ),
     ),
 ])
@@ -68,6 +69,16 @@ def _get_classify_llm():
         temperature=0.0,
         request_timeout=settings.ai_request_timeout,
         model_kwargs={"response_format": {"type": "json_object"}},
+    )
+
+
+def _get_reply_llm():
+    return ChatOpenAI(
+        model=settings.model_name,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        temperature=0.7,
+        request_timeout=settings.ai_request_timeout,
     )
 
 
@@ -99,30 +110,43 @@ def _parse_classification(raw: str) -> IntentResult:
 
 
 def _parse_reply(raw: str) -> str:
+    """解析 LLM 回复。优先尝试 JSON 格式兼容旧逻辑，否则直接使用原文。"""
     import json
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise AIClientError("AI response did not include valid JSON") from exc
-
-    reply = data.get("reply")
-    if not isinstance(reply, str) or not reply.strip():
-        raise AIClientError("AI response did not include a reply") from None
-    return reply.strip()
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+            reply = data.get("reply")
+            if isinstance(reply, str) and reply.strip():
+                return reply.strip()
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not stripped:
+        raise AIClientError("AI returned empty response") from None
+    return stripped
 
 
 def _format_history(history: Optional[list[dict]]) -> str:
     if not history:
-        return "(no prior messages)"
+        return "(无历史对话)"
 
     lines = []
     for item in history[-10:]:
         sender = item.get("sender_type") or item.get("sender") or "unknown"
+        sender_label = "用户" if sender == "user" else "客服"
         content = str(item.get("content", "")).strip()
         if not content:
             continue
-        lines.append(f"{sender}: {content}")
-    return "\n".join(lines) if lines else "(no prior messages)"
+        meta = item.get("meta_data") or {}
+        intent = meta.get("intent")
+        route = meta.get("route")
+        suffix = ""
+        if intent:
+            suffix += f" [意图:{intent}]"
+        if route:
+            suffix += f" [路由:{route}]"
+        lines.append(f"{sender_label}: {content}{suffix}")
+    return "\n".join(lines) if lines else "(无历史对话)"
 
 
 async def classify_via_llm(message: str) -> IntentResult:
@@ -175,9 +199,8 @@ async def reply_via_llm(
         )
         formatted_history = _format_history(history)
         log.info("[reply_llm_client] HISTORY %r", formatted_history)
-        chain = REPLY_PROMPT | _get_classify_llm()
+        chain = REPLY_PROMPT | _get_reply_llm()
         response = await chain.ainvoke({
-            "conversation_id": conversation_id or "new",
             "intent": intent,
             "history": formatted_history,
             "message": user_message,

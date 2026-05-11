@@ -34,6 +34,8 @@ SLOT_CLARIFY_QUESTIONS: dict[str, str] = {
     "invoice_type": "请问您需要个人发票还是企业发票？",
 }
 
+FORMAT_VALIDATED_SLOTS = {"order_id"}
+
 TRANSFER_KEYWORDS = ("转人工", "人工", "真人", "客服接待", "人工客服")
 COMPLAINT_KEYWORDS = ("投诉", "差评", "举报", "监管", "消协")
 HIGH_RISK_KEYWORDS = (
@@ -158,7 +160,8 @@ async def classify_intent(
         # 这适合地址、原因等自由文本；订单号等强格式字段后续仍建议再做校验。
         if not filled and missing_slots:
             first_missing = missing_slots[0]
-            merged[first_missing] = message.strip()
+            if first_missing not in FORMAT_VALIDATED_SLOTS:
+                merged[first_missing] = message.strip()
 
         # 计算补槽后是否仍有必填项缺失。当前返回值里不直接使用，
         # 调用方 chat_graph._calc_missing 会再次计算并决定是否继续追问。

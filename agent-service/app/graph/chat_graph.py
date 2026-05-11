@@ -62,7 +62,7 @@ def fallback_reply(intent: str) -> str:
         "modify_address": "我可以帮您修改收货地址。请提供订单号和新地址。",
         "transfer_human": "正在为您转接人工客服，请稍等。",
         "complaint": "非常抱歉给您带来不好的体验。这个问题我会为您转接人工客服继续处理，请稍等。",
-        "unknown": "感谢您的咨询。请问您想了解订单信息、物流查询、退款，还是其他服务？",
+        "unknown": "抱歉，我暂时无法回答这个问题。您可以换个方式描述，或者我帮您转接人工客服来处理？",
     }
     return replies.get(intent, replies["unknown"])
 
@@ -131,7 +131,7 @@ async def classify_node(state: ChatState) -> ChatState:
 
 
 def route_after_classify(state: ChatState) -> str:
-    """分类后路由：高风险转人工，低置信度澄清，其余检查槽位。"""
+    """分类后路由：高风险转人工，unknown 走 LLM 自由回复，低置信度澄清，其余检查槽位。"""
     intent = state["intent"]
     confidence = state.get("confidence", 0)
     if intent in {"transfer_human", "complaint"}:
@@ -140,6 +140,9 @@ def route_after_classify(state: ChatState) -> str:
     if confidence < 0.4:
         log.info(f"[route] → human_transfer (conf={confidence} < 0.4)")
         return "human_transfer"
+    if intent == "unknown":
+        log.info(f"[route] → generate_reply (unknown intent)")
+        return "generate"
     if confidence < settings.default_confidence_threshold:
         log.info(f"[route] → clarify (conf={confidence} < {settings.default_confidence_threshold})")
         return "clarify"
@@ -270,7 +273,17 @@ async def generate_reply_node(state: ChatState) -> ChatState:
         elif intent == "modify_address":
             reply += "\n如需修改地址，请联系人工客服协助处理。"
     elif order_id:
-        reply = f"没有查询到订单 {order_id}。请确认订单号是否正确，或联系人工客服继续处理。"
+        from app.services.order_service import ORDER_NO_PATTERN
+        if ORDER_NO_PATTERN.search(order_id):
+            reply = (
+                f"订单号 {order_id} 格式正确，但系统未找到该订单。"
+                "请核实订单号是否准确，或我帮您转人工客服查询。"
+            )
+        else:
+            reply = (
+                f"您提供的订单号 {order_id} 格式不正确，"
+                "正确格式为 ORD-XXXXXXXX-XXXX（如 ORD-20260508-0001）。请重新提供。"
+            )
     else:
         try:
             log.info(
@@ -347,6 +360,7 @@ def build_chat_graph():
             "human_transfer": "human_transfer",
             "clarify": "clarify",
             "check_slots": "check_slots",
+            "generate": "generate_reply",
         },
     )
 
