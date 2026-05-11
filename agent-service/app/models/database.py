@@ -102,6 +102,8 @@ class KnowledgeDocument(Base):
     id = Column(String(64), primary_key=True)
     title = Column(String(255), nullable=False)
     source_type = Column(String(64), nullable=False)
+    category = Column(String(64), default="faq")
+    tenant_id = Column(String(64), default="default")
     status = Column(String(32), default="active")
     version = Column(String(32))
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -129,9 +131,25 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+async def _migrate_db(conn):
+    """对已有表执行增量迁移，补充新加的列。"""
+    import sqlalchemy
+    result = await conn.run_sync(lambda sync_conn: sqlalchemy.inspect(sync_conn).get_columns("knowledge_documents"))
+    existing = {col["name"] for col in result}
+    if "category" not in existing:
+        await conn.execute(
+            sqlalchemy.text("ALTER TABLE knowledge_documents ADD COLUMN category VARCHAR(64) DEFAULT 'faq'")
+        )
+    if "tenant_id" not in existing:
+        await conn.execute(
+            sqlalchemy.text("ALTER TABLE knowledge_documents ADD COLUMN tenant_id VARCHAR(64) DEFAULT 'default'")
+        )
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_db(conn)
 
 
 async def get_db() -> AsyncSession:

@@ -64,10 +64,32 @@ export interface KnowledgeDocument {
   id: string
   title: string
   sourceType: string
+  category: string
+  tenantId: string
   status: 'active' | 'inactive'
   version: string
+  chunkCount: number
   createdAt: string
   updatedAt: string
+}
+
+export interface KnowledgeChunk {
+  id: string
+  documentId: string
+  content: string
+  embeddingId: string | null
+  metadata: Record<string, any>
+  createdAt: string
+}
+
+export interface SearchResult {
+  id: string
+  document_id: string
+  title: string
+  content: string
+  score: number
+  category: string
+  metadata: Record<string, any>
 }
 
 export interface AIResponse {

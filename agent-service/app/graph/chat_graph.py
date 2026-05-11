@@ -62,6 +62,7 @@ def fallback_reply(intent: str) -> str:
         "modify_address": "我可以帮您修改收货地址。请提供订单号和新地址。",
         "transfer_human": "正在为您转接人工客服，请稍等。",
         "complaint": "非常抱歉给您带来不好的体验。这个问题我会为您转接人工客服继续处理，请稍等。",
+        "knowledge_query": "暂时没有在知识库中找到可以确认的答案。为了避免误导您，我可以帮您转人工客服继续确认。",
         "unknown": "抱歉，我暂时无法回答这个问题。您可以换个方式描述，或者我帮您转接人工客服来处理？",
     }
     return replies.get(intent, replies["unknown"])
@@ -151,12 +152,15 @@ async def classify_node(state: ChatState) -> ChatState:
 
 
 def route_after_classify(state: ChatState) -> str:
-    """分类后路由：高风险转人工，unknown 走 LLM 自由回复，低置信度澄清，其余检查槽位。"""
+    """分类后路由：高风险转人工，知识库查询走知识库，unknown 走 LLM 自由回复，低置信度澄清，其余检查槽位。"""
     intent = state["intent"]
     confidence = state.get("confidence", 0)
     if intent in {"transfer_human", "complaint"}:
         log.info(f"[route] → human_transfer (intent={intent})")
         return "human_transfer"
+    if intent == "knowledge_query":
+        log.info(f"[route] → knowledge (intent=knowledge_query)")
+        return "knowledge"
     if confidence < 0.4:
         log.info(f"[route] → generate_reply (conf={confidence} < 0.4)")
         return "generate"
@@ -374,10 +378,11 @@ def build_chat_graph():
 
     graph.add_conditional_edges(
         "classify_intent",
-        # 根据意图风险和置信度决定转人工、澄清还是进入槽位检查。
+        # 根据意图风险和置信度决定转人工、知识库、澄清还是进入槽位检查。
         route_after_classify,
         {
             "human_transfer": "human_transfer",
+            "knowledge": "knowledge",
             "clarify": "clarify",
             "check_slots": "check_slots",
             "generate": "generate_reply",

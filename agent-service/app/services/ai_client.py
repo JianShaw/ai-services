@@ -26,7 +26,9 @@ CLASSIFY_SYSTEM_PROMPT = (
     "- modify_address: 修改收货地址\n"
     "- complaint: 投诉、不满、举报\n"
     "- transfer_human: 明确要求转人工、找真人客服\n"
+    "- knowledge_query: 询问工作时间、退货规则、商品材质、企业文化、会员积分、保修售后、发货配送等通用知识问题\n"
     "- unknown: 无法判断意图\n\n"
+    "判断 knowledge_query 的标准：用户询问的是通用规则、政策或知识，而非特定订单的实时数据。\n"
     "同时提取消息中明确出现的槽位值（订单号、商品名等），不要猜测。\n"
     "你必须严格按以下JSON格式回复，不要输出其他内容：\n"
     '{{"intent":"意图名","confidence":0.0,"slots":{{"order_id":"","product_name":""}}}}'

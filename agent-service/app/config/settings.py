@@ -24,8 +24,12 @@ class Settings(BaseSettings):
     model_name: str = "deepseek-v4-flash"
     ai_request_timeout: float = 8.0
 
+    embedding_api_key: Optional[str] = None
+    embedding_base_url: Optional[str] = None
     embedding_model: str = "text-embedding-ada-002"
     embedding_dimension: int = 1536
+    knowledge_score_threshold: float = 0.35
+    knowledge_top_k: int = 5
 
     max_conversation_history: int = 10
     default_confidence_threshold: float = 0.7
